@@ -1,6 +1,6 @@
 # Sayonara Wipe
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
 [![Security](https://img.shields.io/badge/security-hardened-green.svg)](core/README.md)
 
@@ -226,8 +226,8 @@ Get started with Sayonara Wipe in 3 minutes:
 
 ```bash
 # 1. Clone and build
-git clone https://github.com/yourusername/sayonara-wipe.git
-cd sayonara-wipe/core
+git clone https://github.com/yourusername/sayonara.git
+cd sayonara/core
 cargo build --release
 
 # 2. List available drives (identify your target)
@@ -276,8 +276,8 @@ cat certificate.json
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/sayonara-wipe.git
-cd sayonara-wipe/core
+git clone https://github.com/yourusername/sayonara.git
+cd sayonara/core
 
 # Build in release mode
 cargo build --release
@@ -703,7 +703,6 @@ If verification fails:
 
 ### Core Directory Documentation
 
-- **[CLAUDE.md](core/CLAUDE.md)** - Comprehensive development guide for working with the codebase
 - **[I/O Engine](core/src/io/README.md)** - High-performance I/O engine documentation
 - **[Verification System](core/src/verification/README.md)** - 4-level verification system details
 - **[Freeze Mitigation](core/src/drives/freeze/README.md)** - Freeze detection and mitigation strategies
@@ -720,8 +719,8 @@ cargo doc --open --no-deps
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/sayonara-wipe.git
-cd sayonara-wipe/core
+git clone https://github.com/yourusername/sayonara.git
+cd sayonara/core
 
 # Build project
 cargo build
@@ -741,7 +740,17 @@ cargo clippy
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is dual-licensed under your choice of:
+
+- **MIT License** ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+
+You may use this project under the terms of either license. This dual licensing is common in the Rust ecosystem and provides:
+
+- **MIT**: Simple, permissive license with minimal restrictions
+- **Apache 2.0**: Includes explicit patent grants and contributor protections
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in this project shall be dual licensed as above, without any additional terms or conditions.
 
 ## ⚖️ Legal Notice
 
