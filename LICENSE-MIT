@@ -1,6 +1,7 @@
 MIT License
 
 Copyright (c) 2025 Shivesh Tiwari
+Copyright (c) 2025 Ahad Ulla Baig
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +20,16 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+CONTRIBUTION LICENSING
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the Sayonara Wipe project by you shall be dual licensed under
+the MIT License and Apache License 2.0 (as described in the README.md), without
+any additional terms or conditions.
+
+This ensures that all contributions maintain the same licensing flexibility as
+the original project, allowing users to choose the license that best fits their
+needs.
