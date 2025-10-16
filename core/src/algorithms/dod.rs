@@ -3,12 +3,32 @@ use crate::crypto::secure_rng::secure_random_bytes;
 use crate::ui::progress::ProgressBar;
 use crate::io::{OptimizedIO, IOConfig, IOHandle};
 use crate::DriveType;
+use crate::{DriveResult, DriveError};
+use crate::WipeConfig;
+use crate::error::{RecoveryCoordinator, Progress, ErrorContext};
+use serde_json::json;
 
 pub struct DoDWipe;
 
 impl DoDWipe {
-    pub fn wipe_drive(device_path: &str, size: u64, drive_type: DriveType) -> Result<()> {
-        println!("Starting DoD 5220.22-M 3-pass wipe on {}", device_path);
+    pub fn wipe_drive(
+        device_path: &str,
+        size: u64,
+        drive_type: DriveType,
+        config: &WipeConfig,
+    ) -> Result<()> {
+        println!("Starting DoD 5220.22-M 3-pass wipe with error recovery on {}", device_path);
+
+        // Initialize recovery coordinator
+        let mut coordinator = RecoveryCoordinator::new(device_path, config)?;
+
+        // Check for existing checkpoint
+        let start_pass = if let Some(resume) = coordinator.resume_from_checkpoint("DoD")? {
+            println!("Resuming from pass {} (checkpoint found)", resume.current_pass + 1);
+            resume.current_pass
+        } else {
+            0
+        };
 
         // Configure I/O based on drive type
         let io_config = match drive_type {
@@ -22,22 +42,49 @@ impl DoDWipe {
         let mut io_handle = OptimizedIO::open(device_path, io_config)?;
 
         // Pass 1: Write 0x00
-        println!("\n🔄 Pass 1/3: Writing 0x00");
-        Self::write_pattern(&mut io_handle, size, 0x00)?;
+        if start_pass <= 0 {
+            println!("\n🔄 Pass 1/3: Writing 0x00");
+            let context = ErrorContext::new("dod_pass_1", device_path);
+            coordinator.execute_with_recovery("pass_1", context, || -> DriveResult<()> { Self::write_pattern(&mut io_handle, size, 0x00).map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))))?; Ok(()) })?;
+            coordinator.maybe_checkpoint("DoD", 3, size * 3, &Progress {
+                current_pass: 1,
+                bytes_written: size,
+                state: json!({"pass": 1}),
+            })?;
+        }
 
         // Pass 2: Write 0xFF
-        println!("\n🔄 Pass 2/3: Writing 0xFF");
-        Self::write_pattern(&mut io_handle, size, 0xFF)?;
+        if start_pass <= 1 {
+            println!("\n🔄 Pass 2/3: Writing 0xFF");
+            let context = ErrorContext::new("dod_pass_2", device_path);
+            coordinator.execute_with_recovery("pass_2", context, || -> DriveResult<()> { Self::write_pattern(&mut io_handle, size, 0xFF).map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))))?; Ok(()) })?;
+            coordinator.maybe_checkpoint("DoD", 3, size * 3, &Progress {
+                current_pass: 2,
+                bytes_written: size * 2,
+                state: json!({"pass": 2}),
+            })?;
+        }
 
         // Pass 3: Write random data
-        println!("\n🔄 Pass 3/3: Writing random data");
-        Self::write_random(&mut io_handle, size)?;
+        if start_pass <= 2 {
+            println!("\n🔄 Pass 3/3: Writing random data");
+            let context = ErrorContext::new("dod_pass_3", device_path);
+            coordinator.execute_with_recovery("pass_3", context, || -> DriveResult<()> { Self::write_random(&mut io_handle, size).map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))))?; Ok(()) })?;
+            coordinator.maybe_checkpoint("DoD", 3, size * 3, &Progress {
+                current_pass: 3,
+                bytes_written: size * 3,
+                state: json!({"pass": 3}),
+            })?;
+        }
 
         // Final sync
         io_handle.sync()?;
 
         // Print performance report
         OptimizedIO::print_performance_report(&io_handle, None);
+
+        // Clean up checkpoint on success
+        coordinator.delete_checkpoint()?;
 
         println!("\n✅ DoD wipe completed successfully");
         Ok(())

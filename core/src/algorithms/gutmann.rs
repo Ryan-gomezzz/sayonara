@@ -5,7 +5,9 @@ use std::time::Instant;
 use crate::ui::progress::ProgressBar;
 use crate::io::{OptimizedIO, IOConfig, IOHandle};
 use crate::DriveType;
-use serde::{Serialize, Deserialize};
+use crate::WipeConfig;
+use crate::error::{RecoveryCoordinator, Progress, ErrorContext};
+use serde_json::json;
 
 /// Drive encoding types that affect pattern selection
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -14,17 +16,6 @@ pub enum DriveEncoding {
     RLL,      // Run Length Limited (2,7)
     PRML,     // Partial Response Maximum Likelihood (modern drives)
     Unknown,  // Default to most comprehensive patterns
-}
-
-/// Checkpoint for resume capability
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GutmannCheckpoint {
-    pub device_path: String,
-    pub current_pass: usize,
-    pub bytes_written: u64,
-    pub total_size: u64,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub encoding: String,
 }
 
 pub struct GutmannWipe;
@@ -76,23 +67,30 @@ impl GutmannWipe {
         (None, "Random Pass 35"),
     ];
 
-    /// Perform the complete 35-pass Gutmann wipe with verification
-    pub fn wipe_drive(device_path: &str, size: u64, drive_type: DriveType) -> Result<()> {
-        println!("Starting Gutmann 35-pass secure wipe on {}", device_path);
+    /// Perform the complete 35-pass Gutmann wipe with error recovery
+    pub fn wipe_drive(
+        device_path: &str,
+        size: u64,
+        drive_type: DriveType,
+        config: &WipeConfig,
+    ) -> Result<()> {
+        println!("Starting Gutmann 35-pass secure wipe with error recovery on {}", device_path);
         println!("Drive size: {} bytes ({} GB)", size, size / (1024 * 1024 * 1024));
 
         // Detect drive encoding
         let encoding = Self::detect_drive_encoding(device_path)?;
         println!("Detected drive encoding: {:?}", encoding);
 
-        // Check for existing checkpoint
-        let checkpoint = Self::load_checkpoint(device_path);
-        let start_pass = checkpoint.as_ref().map(|c| c.current_pass).unwrap_or(0);
+        // Initialize recovery coordinator
+        let mut coordinator = RecoveryCoordinator::new(device_path, config)?;
 
-        if let Some(cp) = &checkpoint {
-            println!("Resuming from pass {} (checkpoint found from {})",
-                     cp.current_pass + 1, cp.timestamp);
-        }
+        // Check for existing checkpoint and resume if available
+        let start_pass = if let Some(resume) = coordinator.resume_from_checkpoint("Gutmann")? {
+            println!("Resuming from pass {} (checkpoint found)", resume.current_pass + 1);
+            resume.current_pass
+        } else {
+            0
+        };
 
         // Configure I/O based on drive type
         let io_config = match drive_type {
@@ -105,7 +103,7 @@ impl GutmannWipe {
         // Open device with optimized I/O
         let mut io_handle = OptimizedIO::open(device_path, io_config)?;
 
-        // Perform each pass
+        // Perform each pass with error recovery
         for (pass_num, (pattern, description)) in Self::GUTMANN_PATTERNS.iter().enumerate() {
             // Skip completed passes if resuming
             if pass_num < start_pass {
@@ -116,19 +114,46 @@ impl GutmannWipe {
 
             let pass_start = Instant::now();
 
-            // Write the pattern
-            if let Some(pattern_bytes) = pattern {
-                Self::write_pattern_with_verification(&mut io_handle, size, pattern_bytes, pass_num)?;
-            } else {
-                Self::write_random_with_verification(&mut io_handle, size, pass_num)?;
-            }
+            // Create error context for this pass
+            let context = ErrorContext::new(
+                format!("gutmann_pass_{}", pass_num + 1),
+                device_path,
+            );
+
+            // Execute pass with recovery
+            coordinator.execute_with_recovery(
+                &format!("pass_{}", pass_num + 1),
+                context,
+                || {
+                    // Write the pattern
+                    if let Some(pattern_bytes) = pattern {
+                        Self::write_pattern_with_verification(&mut io_handle, size, pattern_bytes, pass_num)?;
+                    } else {
+                        Self::write_random_with_verification(&mut io_handle, size, pass_num)?;
+                    }
+                    Ok(())
+                }
+            )?;
 
             let pass_duration = pass_start.elapsed();
             println!("  ✅ Pass {} completed and verified in {:.2}s",
                      pass_num + 1, pass_duration.as_secs_f64());
 
-            // Save checkpoint after each pass
-            Self::save_checkpoint(device_path, pass_num + 1, size, &encoding)?;
+            // Save checkpoint using RecoveryCoordinator
+            let bytes_written = (pass_num as u64 + 1) * size;
+            coordinator.maybe_checkpoint(
+                "Gutmann",
+                35,
+                size * 35,
+                &Progress {
+                    current_pass: pass_num + 1,
+                    bytes_written,
+                    state: json!({
+                        "encoding": format!("{:?}", encoding),
+                        "total_passes": 35,
+                    }),
+                },
+            )?;
         }
 
         // Final sync
@@ -137,8 +162,8 @@ impl GutmannWipe {
         // Print performance report
         OptimizedIO::print_performance_report(&io_handle, None);
 
-        // Clean up checkpoint
-        Self::delete_checkpoint(device_path);
+        // Clean up checkpoint on successful completion
+        coordinator.delete_checkpoint()?;
 
         println!("\n✅ Gutmann 35-pass wipe completed successfully!");
         println!("All data has been securely overwritten and verified.");
@@ -378,58 +403,6 @@ impl GutmannWipe {
         }
 
         entropy
-    }
-
-    /// Save checkpoint for resume capability
-    pub(crate) fn save_checkpoint(
-        device_path: &str,
-        current_pass: usize,
-        total_size: u64,
-        encoding: &DriveEncoding
-    ) -> Result<()> {
-        let checkpoint = GutmannCheckpoint {
-            device_path: device_path.to_string(),
-            current_pass,
-            bytes_written: 0,
-            total_size,
-            timestamp: chrono::Utc::now(),
-            encoding: format!("{:?}", encoding),
-        };
-
-        let checkpoint_file = Self::checkpoint_filename(device_path);
-        let json = serde_json::to_string_pretty(&checkpoint)?;
-        std::fs::write(checkpoint_file, json)?;
-
-        Ok(())
-    }
-
-    /// Load checkpoint if it exists
-    pub(crate) fn load_checkpoint(device_path: &str) -> Option<GutmannCheckpoint> {
-        let checkpoint_file = Self::checkpoint_filename(device_path);
-
-        if let Ok(json) = std::fs::read_to_string(&checkpoint_file) {
-            if let Ok(checkpoint) = serde_json::from_str::<GutmannCheckpoint>(&json) {
-                // Check if checkpoint is recent (within 24 hours)
-                let age = chrono::Utc::now() - checkpoint.timestamp;
-                if age.num_hours() < 24 {
-                    return Some(checkpoint);
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Delete checkpoint after successful completion
-    pub(crate) fn delete_checkpoint(device_path: &str) {
-        let checkpoint_file = Self::checkpoint_filename(device_path);
-        let _ = std::fs::remove_file(checkpoint_file);
-    }
-
-    /// Generate checkpoint filename for a device
-    fn checkpoint_filename(device_path: &str) -> String {
-        let safe_name = device_path.replace('/', "_");
-        format!("/tmp/gutmann_checkpoint{}.json", safe_name)
     }
 
     /// Select optimal patterns based on drive encoding

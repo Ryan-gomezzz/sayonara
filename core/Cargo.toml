@@ -72,17 +72,24 @@ regex = "1.10"
 num_cpus = "1.16"
 
 # Database for checkpoint storage (SQLite)
-rusqlite = { version = "0.30", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "chrono"] }
 
 # Tracing for structured logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt", "time"] }
+tracing-appender = "0.2"
 
 # System information
 sysinfo = "0.30"
 
 # Process management
 procfs = "0.16"
+
+# Glob pattern matching
+glob = "0.3"
+
+# Humantime formatting
+humantime = "2.1"
 
 [dev-dependencies]
 criterion = "0.5"

@@ -1499,7 +1499,7 @@ async fn select_and_execute_wipe(
             println!("Using specialized wipe strategy...\n");
 
             use sayonara_wipe::WipeOrchestrator;
-            let orchestrator = WipeOrchestrator::new(device.to_string(), config.clone())
+            let mut orchestrator = WipeOrchestrator::new(device.to_string(), config.clone())
                 .map_err(|e| anyhow::anyhow!("Orchestrator initialization failed: {}", e))?;
 
             orchestrator.execute().await
@@ -1515,7 +1515,7 @@ async fn select_and_execute_wipe(
                 println!("Using specialized wipe strategy...\n");
 
                 use sayonara_wipe::WipeOrchestrator;
-                let orchestrator = WipeOrchestrator::new(device.to_string(), config.clone())
+                let mut orchestrator = WipeOrchestrator::new(device.to_string(), config.clone())
                     .map_err(|e| anyhow::anyhow!("Orchestrator initialization failed: {}", e))?;
 
                 orchestrator.execute().await
@@ -1551,17 +1551,17 @@ async fn select_and_execute_wipe(
 
     match algorithm {
         Algorithm::DoD5220 => {
-            DoDWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone())?;
+            DoDWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone(), &config)?;
         }
         Algorithm::Gutmann => {
-            GutmannWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone())?;
+            GutmannWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone(), &config)?;
         }
         Algorithm::Random => {
-            RandomWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone())?;
+            RandomWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone(), &config)?;
         }
         Algorithm::Zero => {
             // Simple zero overwrite
-            DoDWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone())?; // Reuse with zero pattern
+            DoDWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone(), &config)?; // Reuse with zero pattern
         }
         Algorithm::SecureErase => {
             match drive_info.drive_type {
@@ -1570,7 +1570,7 @@ async fn select_and_execute_wipe(
                 DriveType::HDD => HDDWipe::secure_erase(device)?,
                 _ => {
                     println!("Hardware secure erase not available, falling back to DoD");
-                    DoDWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone())?;
+                    DoDWipe::wipe_drive(device, drive_info.size, drive_info.drive_type.clone(), &config)?;
                 }
             }
         }

@@ -20,35 +20,42 @@ use crate::{
             WipeAlgorithm,
         },
     },
+    error::{RecoveryCoordinator, ErrorContext},
 };
 use crate::drives::types::emmc::EMMCDevice;
 use anyhow::Result;
 use std::fs::OpenOptions;
 use std::io::{Write, Seek, SeekFrom};
 
-/// Main wipe orchestrator
+/// Main wipe orchestrator with integrated error recovery
 pub struct WipeOrchestrator {
     device_path: String,
     config: WipeConfig,
     drive_info: DriveInfo,
+    recovery_coordinator: RecoveryCoordinator,
 }
 
 impl WipeOrchestrator {
-    /// Create new orchestrator for a device
+    /// Create new orchestrator for a device with error recovery
     pub fn new(device_path: String, config: WipeConfig) -> Result<Self> {
         // Detect drive type and capabilities
         // For now, create a basic DriveInfo
         let drive_info = Self::create_basic_drive_info(&device_path)?;
 
+        // Initialize recovery coordinator for error handling and checkpointing
+        let recovery_coordinator = RecoveryCoordinator::new(&device_path, &config)
+            .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to initialize recovery coordinator: {}", e))))?;
+
         Ok(Self {
             device_path,
             config,
             drive_info,
+            recovery_coordinator,
         })
     }
 
-    /// Execute the wipe operation
-    pub async fn execute(&self) -> DriveResult<()> {
+    /// Execute the wipe operation with error recovery
+    pub async fn execute(&mut self) -> DriveResult<()> {
         println!("\n=== Starting Wipe Operation ===");
         println!("Device: {}", self.device_path);
         println!("Model: {}", self.drive_info.model);
@@ -74,9 +81,9 @@ impl WipeOrchestrator {
         }
     }
 
-    /// Wipe SMR (Shingled Magnetic Recording) drive
-    async fn wipe_smr_drive(&self) -> DriveResult<()> {
-        println!("📀 Detected SMR drive - using zone-aware wipe strategy with OptimizedIO");
+    /// Wipe SMR (Shingled Magnetic Recording) drive with error recovery
+    async fn wipe_smr_drive(&mut self) -> DriveResult<()> {
+        println!("📀 Detected SMR drive - using zone-aware wipe strategy with OptimizedIO + Recovery");
 
         let smr = SMRDrive::get_zone_configuration(&self.device_path)
             .map_err(|e| DriveError::HardwareCommandFailed(format!("SMR detection failed: {}", e)))?;
@@ -89,19 +96,32 @@ impl WipeOrchestrator {
         // Convert WipeConfig algorithm to WipeAlgorithm
         let wipe_algorithm = self.convert_to_wipe_algorithm();
 
-        // Use integrated wipe with OptimizedIO engine
-        wipe_smr_drive_integrated(&smr, wipe_algorithm)
-            .map_err(|e| DriveError::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, format!("SMR wipe failed: {}", e))
-            ))?;
+        // Create error context for recovery
+        let context = ErrorContext::new(
+            "smr_wipe",
+            &self.device_path,
+        );
+
+        // Execute with recovery coordinator
+        self.recovery_coordinator.execute_with_recovery(
+            "wipe_smr_drive",
+            context,
+            || -> DriveResult<()> {
+                wipe_smr_drive_integrated(&smr, wipe_algorithm.clone())
+                    .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))))?;
+                Ok(())
+            }
+        ).map_err(|e| DriveError::IoError(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        ))?;
 
         println!("✅ SMR drive wipe completed successfully");
         Ok(())
     }
 
-    /// Wipe Intel Optane / 3D XPoint drive
-    async fn wipe_optane_drive(&self) -> DriveResult<()> {
-        println!("⚡ Detected Intel Optane drive - checking for ISE support with OptimizedIO");
+    /// Wipe Intel Optane / 3D XPoint drive with error recovery
+    async fn wipe_optane_drive(&mut self) -> DriveResult<()> {
+        println!("⚡ Detected Intel Optane drive - checking for ISE support with OptimizedIO + Recovery");
 
         let optane = OptaneDrive::get_configuration(&self.device_path)
             .map_err(|e| DriveError::HardwareCommandFailed(format!("Optane detection failed: {}", e)))?;
@@ -111,21 +131,35 @@ impl WipeOrchestrator {
         println!("ISE Support: {}", if optane.supports_ise { "Yes" } else { "No" });
         println!();
 
-        // Use integrated wipe with OptimizedIO engine
         // Prefer hardware ISE if available
         let use_ise = optane.supports_ise;
-        wipe_optane_drive_integrated(&optane, use_ise)
-            .map_err(|e| DriveError::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, format!("Optane wipe failed: {}", e))
-            ))?;
+
+        // Create error context
+        let context = ErrorContext::new(
+            "optane_wipe",
+            &self.device_path,
+        );
+
+        // Execute with recovery coordinator
+        self.recovery_coordinator.execute_with_recovery(
+            "wipe_optane_drive",
+            context,
+            || -> DriveResult<()> {
+                wipe_optane_drive_integrated(&optane, use_ise)
+                    .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))))?;
+                Ok(())
+            }
+        ).map_err(|e| DriveError::IoError(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        ))?;
 
         println!("✅ Optane drive wipe completed successfully");
         Ok(())
     }
 
-    /// Wipe Hybrid SSHD drive
-    async fn wipe_hybrid_drive(&self) -> DriveResult<()> {
-        println!("🔀 Detected Hybrid SSHD - wiping both HDD and SSD cache with OptimizedIO");
+    /// Wipe Hybrid SSHD drive with error recovery
+    async fn wipe_hybrid_drive(&mut self) -> DriveResult<()> {
+        println!("🔀 Detected Hybrid SSHD - wiping both HDD and SSD cache with OptimizedIO + Recovery");
 
         let mut hybrid = HybridDrive::get_configuration(&self.device_path)
             .map_err(|e| DriveError::HardwareCommandFailed(format!("Hybrid detection failed: {}", e)))?;
@@ -137,19 +171,32 @@ impl WipeOrchestrator {
                  hybrid.ssd_cache.cache_size / (1024 * 1024 * 1024));
         println!();
 
-        // Use integrated wipe with OptimizedIO engine
-        wipe_hybrid_drive_integrated(&mut hybrid)
-            .map_err(|e| DriveError::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, format!("Hybrid wipe failed: {}", e))
-            ))?;
+        // Create error context
+        let context = ErrorContext::new(
+            "hybrid_wipe",
+            &self.device_path,
+        );
+
+        // Execute with recovery coordinator
+        self.recovery_coordinator.execute_with_recovery(
+            "wipe_hybrid_drive",
+            context,
+            || -> DriveResult<()> {
+                wipe_hybrid_drive_integrated(&mut hybrid)
+                    .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))))?;
+                Ok(())
+            }
+        ).map_err(|e| DriveError::IoError(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        ))?;
 
         println!("✅ Hybrid drive wipe completed successfully");
         Ok(())
     }
 
-    /// Wipe eMMC embedded storage
-    async fn wipe_emmc_drive(&self) -> DriveResult<()> {
-        println!("📱 Detected eMMC device - wiping all partitions with OptimizedIO");
+    /// Wipe eMMC embedded storage with error recovery
+    async fn wipe_emmc_drive(&mut self) -> DriveResult<()> {
+        println!("📱 Detected eMMC device - wiping all partitions with OptimizedIO + Recovery");
 
         let emmc = EMMCDevice::get_configuration(&self.device_path)
             .map_err(|e| DriveError::HardwareCommandFailed(format!("eMMC detection failed: {}", e)))?;
@@ -158,46 +205,77 @@ impl WipeOrchestrator {
         println!("Boot Partitions: {}", emmc.boot_partitions.len());
         println!();
 
-        // Use integrated wipe with OptimizedIO engine
         // Try hardware erase first, fall back to software if not supported
-        let use_hardware = true; // Can be made configurable
-        wipe_emmc_drive_integrated(&emmc, use_hardware)
-            .map_err(|e| DriveError::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, format!("eMMC wipe failed: {}", e))
-            ))?;
+        let use_hardware = true;
+
+        // Create error context
+        let context = ErrorContext::new(
+            "emmc_wipe",
+            &self.device_path,
+        );
+
+        // Execute with recovery coordinator
+        self.recovery_coordinator.execute_with_recovery(
+            "wipe_emmc_drive",
+            context,
+            || -> DriveResult<()> {
+                wipe_emmc_drive_integrated(&emmc, use_hardware)
+                    .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))))?;
+                Ok(())
+            }
+        ).map_err(|e| DriveError::IoError(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        ))?;
 
         println!("✅ eMMC wipe completed successfully");
         Ok(())
     }
 
-    /// Wipe UFS (Universal Flash Storage)
-    async fn wipe_ufs_drive(&self) -> DriveResult<()> {
-        println!("📱 Detected UFS device - using PURGE command");
-
-        // UFS detection and wipe via purge command
+    /// Wipe UFS (Universal Flash Storage) with error recovery
+    async fn wipe_ufs_drive(&mut self) -> DriveResult<()> {
+        println!("📱 Detected UFS device - using PURGE command with Recovery");
         println!("⚠️  UFS full integration pending, using PURGE command");
 
-        let output = std::process::Command::new("sg_unmap")
-            .arg("--all")
-            .arg(&self.device_path)
-            .output()
-            .map_err(|e| DriveError::HardwareCommandFailed(format!("UFS PURGE failed: {}", e)))?;
+        // Create error context
+        let context = ErrorContext::new(
+            "ufs_wipe",
+            &self.device_path,
+        );
 
-        if !output.status.success() {
-            return Err(DriveError::HardwareCommandFailed("UFS PURGE command failed".to_string()));
-        }
+        let device_path = self.device_path.clone();
+
+        // Execute with recovery coordinator
+        self.recovery_coordinator.execute_with_recovery(
+            "wipe_ufs_drive",
+            context,
+            || {
+                let output = std::process::Command::new("sg_unmap")
+                    .arg("--all")
+                    .arg(&device_path)
+                    .output()
+                    .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("UFS PURGE failed: {}", e))))?;
+
+                if !output.status.success() {
+                    return Err(DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, "UFS PURGE command failed")));
+                }
+
+                Ok(())
+            }
+        ).map_err(|e| DriveError::IoError(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        ))?;
 
         println!("✅ UFS wipe completed successfully");
         Ok(())
     }
 
-    /// Wipe NVMe drive (check for advanced features first)
-    async fn wipe_nvme_drive(&self) -> DriveResult<()> {
-        println!("💾 Detected NVMe drive - checking for advanced features");
+    /// Wipe NVMe drive with error recovery (check for advanced features first)
+    async fn wipe_nvme_drive(&mut self) -> DriveResult<()> {
+        println!("💾 Detected NVMe drive - checking for advanced features with Recovery");
 
         // Check if this is an advanced NVMe with ZNS, multiple namespaces, etc.
         if NVMeAdvanced::detect_advanced_features(&self.device_path).unwrap_or(false) {
-            println!("🔬 Advanced NVMe features detected, using OptimizedIO with namespace support");
+            println!("🔬 Advanced NVMe features detected, using OptimizedIO with namespace support + Recovery");
             println!();
 
             // Get advanced NVMe configuration
@@ -208,78 +286,141 @@ impl WipeOrchestrator {
             println!("ZNS Support: {}", nvme_advanced.zns_support);
             println!();
 
-            // Use integrated wipe with OptimizedIO engine
             // Prefer hardware format, but can fall back to software
-            let use_format = true; // Can be made configurable
-            wipe_nvme_advanced_integrated(&nvme_advanced, use_format)
-                .map_err(|e| DriveError::IoError(
-                    std::io::Error::new(std::io::ErrorKind::Other, format!("Advanced NVMe wipe failed: {}", e))
-                ))?;
+            let use_format = true;
+
+            // Create error context
+            let context = ErrorContext::new(
+            "nvme_advanced_wipe",
+            &self.device_path,
+        );
+
+            // Execute with recovery coordinator
+            self.recovery_coordinator.execute_with_recovery(
+                "wipe_nvme_advanced",
+                context,
+                || {
+                    wipe_nvme_advanced_integrated(&nvme_advanced, use_format)
+                        .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("Advanced NVMe wipe failed: {}", e))))
+                }
+            ).map_err(|e| DriveError::IoError(
+                std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+            ))?;
 
             println!("✅ Advanced NVMe wipe completed successfully");
             return Ok(());
         }
 
         // Fall back to basic NVMe wipe via sanitize command
-        println!("Using standard NVMe sanitize command");
-        let output = std::process::Command::new("nvme")
-            .arg("sanitize")
-            .arg(&self.device_path)
-            .arg("-a").arg("2")  // Cryptographic erase
-            .output()
-            .map_err(|e| DriveError::HardwareCommandFailed(format!("NVMe sanitize failed: {}", e)))?;
+        println!("Using standard NVMe sanitize command with Recovery");
 
-        if !output.status.success() {
-            return Err(DriveError::HardwareCommandFailed("NVMe sanitize failed".to_string()));
-        }
+        // Create error context
+        let context = ErrorContext::new(
+            "nvme_basic_wipe",
+            &self.device_path,
+        );
+
+        let device_path = self.device_path.clone();
+
+        // Execute with recovery coordinator
+        self.recovery_coordinator.execute_with_recovery(
+            "wipe_nvme_basic",
+            context,
+            || {
+                let output = std::process::Command::new("nvme")
+                    .arg("sanitize")
+                    .arg(&device_path)
+                    .arg("-a").arg("2")  // Cryptographic erase
+                    .output()
+                    .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("NVMe sanitize failed: {}", e))))?;
+
+                if !output.status.success() {
+                    return Err(DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, "NVMe sanitize failed")));
+                }
+
+                Ok(())
+            }
+        ).map_err(|e| DriveError::IoError(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        ))?;
 
         println!("✅ NVMe wipe completed successfully");
         Ok(())
     }
 
-    /// Wipe SSD drive
-    async fn wipe_ssd_drive(&self) -> DriveResult<()> {
-        println!("💿 Detected SSD - using TRIM-aware wipe strategy");
-
-        // Use generic overwrite + TRIM for now
+    /// Wipe SSD drive with error recovery
+    async fn wipe_ssd_drive(&mut self) -> DriveResult<()> {
+        println!("💿 Detected SSD - using TRIM-aware wipe strategy with Recovery");
         println!("⚠️  Using simplified SSD wipe (full integration pending)");
 
-        // Perform basic overwrite
-        self.write_pattern_to_region(0, self.drive_info.size)
-            .map_err(|e| DriveError::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, format!("SSD wipe failed: {}", e))
-            ))?;
+        // Create error context
+        let context = ErrorContext::new(
+            "ssd_wipe",
+            &self.device_path,
+        );
 
-        // Then TRIM if supported
-        if self.drive_info.capabilities.trim_support {
-            let _ = std::process::Command::new("blkdiscard")
-                .arg(&self.device_path)
-                .output();
-        }
+        let device_path = self.device_path.clone();
+        let size = self.drive_info.size;
+        let trim_support = self.drive_info.capabilities.trim_support;
+
+        // Execute with recovery coordinator
+        self.recovery_coordinator.execute_with_recovery(
+            "wipe_ssd_drive",
+            context,
+            || {
+                // Perform basic overwrite
+                self.write_pattern_to_region(0, size)
+                    .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("SSD wipe failed: {}", e))))?;
+
+                // Then TRIM if supported
+                if trim_support {
+                    let _ = std::process::Command::new("blkdiscard")
+                        .arg(&device_path)
+                        .output();
+                }
+
+                Ok(())
+            }
+        ).map_err(|e| DriveError::IoError(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        ))?;
 
         println!("✅ SSD wipe completed successfully");
         Ok(())
     }
 
-    /// Wipe HDD drive
-    async fn wipe_hdd_drive(&self) -> DriveResult<()> {
-        println!("💽 Detected HDD - using traditional overwrite strategy");
-
-        // Use generic overwrite for now
+    /// Wipe HDD drive with error recovery
+    async fn wipe_hdd_drive(&mut self) -> DriveResult<()> {
+        println!("💽 Detected HDD - using traditional overwrite strategy with Recovery");
         println!("⚠️  Using simplified HDD wipe (full integration pending)");
 
-        self.write_pattern_to_region(0, self.drive_info.size)
-            .map_err(|e| DriveError::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, format!("HDD wipe failed: {}", e))
-            ))?;
+        // Create error context
+        let context = ErrorContext::new(
+            "hdd_wipe",
+            &self.device_path,
+        );
+
+        let size = self.drive_info.size;
+
+        // Execute with recovery coordinator
+        self.recovery_coordinator.execute_with_recovery(
+            "wipe_hdd_drive",
+            context,
+            || {
+                self.write_pattern_to_region(0, size)
+                    .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("HDD wipe failed: {}", e))))
+            }
+        ).map_err(|e| DriveError::IoError(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        ))?;
 
         println!("✅ HDD wipe completed successfully");
         Ok(())
     }
 
-    /// Wipe RAID array member
-    async fn wipe_raid_member(&self) -> DriveResult<()> {
-        println!("🔗 Detected RAID array member - using OptimizedIO");
+    /// Wipe RAID array member with error recovery
+    async fn wipe_raid_member(&mut self) -> DriveResult<()> {
+        println!("🔗 Detected RAID array member - using OptimizedIO + Recovery");
         println!("⚠️  Warning: Wiping individual RAID members will destroy the array!");
 
         // Check if user confirmed
@@ -300,13 +441,24 @@ impl WipeOrchestrator {
         println!("Members: {}", raid.member_drives.len());
         println!();
 
-        // Use integrated wipe with OptimizedIO engine
-        // This will wipe all members and metadata
+        // Create error context
+        let context = ErrorContext::new(
+            "raid_wipe",
+            &self.device_path,
+        );
+
+        // Execute with recovery coordinator
         let wipe_metadata = true;
-        wipe_raid_array_integrated(&raid, wipe_metadata)
-            .map_err(|e| DriveError::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, format!("RAID wipe failed: {}", e))
-            ))?;
+        self.recovery_coordinator.execute_with_recovery(
+            "wipe_raid_member",
+            context,
+            || {
+                wipe_raid_array_integrated(&raid, wipe_metadata)
+                    .map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("RAID wipe failed: {}", e))))
+            }
+        ).map_err(|e| DriveError::IoError(
+            std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))
+        ))?;
 
         println!("✅ RAID member wipe completed successfully");
         Ok(())
@@ -401,9 +553,9 @@ impl WipeOrchestrator {
     }
 }
 
-/// Convenience function for simple wipe operations
+/// Convenience function for simple wipe operations with error recovery
 pub async fn wipe_drive(device_path: &str, config: WipeConfig) -> DriveResult<()> {
-    let orchestrator = WipeOrchestrator::new(device_path.to_string(), config)
+    let mut orchestrator = WipeOrchestrator::new(device_path.to_string(), config)
         .map_err(|e| DriveError::HardwareCommandFailed(format!("Orchestrator creation failed: {}", e)))?;
 
     orchestrator.execute().await
