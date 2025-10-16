@@ -3,12 +3,30 @@ use crate::ui::progress::ProgressBar;
 use crate::crypto::secure_rng::get_secure_rng;
 use crate::io::{OptimizedIO, IOConfig, IOHandle};
 use crate::DriveType;
+use crate::{DriveResult, DriveError};
+use crate::WipeConfig;
+use crate::error::{RecoveryCoordinator, Progress, ErrorContext};
+use serde_json::json;
 
 pub struct RandomWipe;
 
 impl RandomWipe {
-    pub fn wipe_drive(device_path: &str, size: u64, drive_type: DriveType) -> Result<()> {
-        println!("Starting single-pass random wipe on {}", device_path);
+    pub fn wipe_drive(
+        device_path: &str,
+        size: u64,
+        drive_type: DriveType,
+        config: &WipeConfig,
+    ) -> Result<()> {
+        println!("Starting single-pass random wipe with error recovery on {}", device_path);
+
+        // Initialize recovery coordinator
+        let mut coordinator = RecoveryCoordinator::new(device_path, config)?;
+
+        // Check for existing checkpoint
+        let should_resume = coordinator.resume_from_checkpoint("Random")?.is_some();
+        if should_resume {
+            println!("Resuming random wipe from checkpoint");
+        }
 
         // Configure I/O based on drive type
         let io_config = match drive_type {
@@ -21,13 +39,25 @@ impl RandomWipe {
         // Open device with optimized I/O
         let mut io_handle = OptimizedIO::open(device_path, io_config)?;
 
-        Self::write_random(&mut io_handle, size)?;
+        // Execute with recovery
+        let context = ErrorContext::new("random_wipe", device_path);
+        coordinator.execute_with_recovery("random_wipe", context, || -> DriveResult<()> { Self::write_random(&mut io_handle, size).map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))))?; Ok(()) })?;
+
+        // Save final checkpoint
+        coordinator.maybe_checkpoint("Random", 1, size, &Progress {
+            current_pass: 1,
+            bytes_written: size,
+            state: json!({"complete": true}),
+        })?;
 
         // Final sync
         io_handle.sync()?;
 
         // Print performance report
         OptimizedIO::print_performance_report(&io_handle, None);
+
+        // Clean up checkpoint
+        coordinator.delete_checkpoint()?;
 
         println!("\n✅ Random wipe completed successfully");
         Ok(())

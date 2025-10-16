@@ -10,14 +10,32 @@ use anyhow::Result;
 use crate::ui::progress::ProgressBar;
 use crate::io::{OptimizedIO, IOConfig, IOHandle};
 use crate::DriveType;
+use crate::{DriveResult, DriveError};
+use crate::WipeConfig;
+use crate::error::{RecoveryCoordinator, Progress, ErrorContext};
+use serde_json::json;
 
 pub struct ZeroWipe;
 
 impl ZeroWipe {
-    /// Perform a single-pass zero wipe
-    pub fn wipe_drive(device_path: &str, size: u64, drive_type: DriveType) -> Result<()> {
-        println!("Starting single-pass zero wipe on {}", device_path);
+    /// Perform a single-pass zero wipe with error recovery
+    pub fn wipe_drive(
+        device_path: &str,
+        size: u64,
+        drive_type: DriveType,
+        config: &WipeConfig,
+    ) -> Result<()> {
+        println!("Starting single-pass zero wipe with error recovery on {}", device_path);
         println!("Drive size: {} bytes ({} GB)", size, size / (1024 * 1024 * 1024));
+
+        // Initialize recovery coordinator
+        let mut coordinator = RecoveryCoordinator::new(device_path, config)?;
+
+        // Check for existing checkpoint
+        let should_resume = coordinator.resume_from_checkpoint("Zero")?.is_some();
+        if should_resume {
+            println!("Resuming zero wipe from checkpoint");
+        }
 
         // Configure I/O based on drive type
         let io_config = match drive_type {
@@ -31,13 +49,26 @@ impl ZeroWipe {
         let mut io_handle = OptimizedIO::open(device_path, io_config)?;
 
         println!("\n🔄 Writing zeros to entire drive");
-        Self::write_zeros(&mut io_handle, size)?;
+
+        // Execute with recovery
+        let context = ErrorContext::new("zero_wipe", device_path);
+        coordinator.execute_with_recovery("zero_wipe", context, || -> DriveResult<()> { Self::write_zeros(&mut io_handle, size).map_err(|e| DriveError::IoError(std::io::Error::new(std::io::ErrorKind::Other, format!("{}", e))))?; Ok(()) })?;
+
+        // Save final checkpoint
+        coordinator.maybe_checkpoint("Zero", 1, size, &Progress {
+            current_pass: 1,
+            bytes_written: size,
+            state: json!({"complete": true}),
+        })?;
 
         // Final sync
         io_handle.sync()?;
 
         // Print performance report
         OptimizedIO::print_performance_report(&io_handle, None);
+
+        // Clean up checkpoint
+        coordinator.delete_checkpoint()?;
 
         println!("\n✅ Zero wipe completed successfully");
         println!("All sectors have been overwritten with zeros.");

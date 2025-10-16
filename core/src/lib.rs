@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod ui;
 pub mod io;
 pub mod wipe_orchestrator;
+pub mod error;
 
 // Re-export main wipe orchestrator for convenience
 pub use wipe_orchestrator::{WipeOrchestrator, wipe_drive};
@@ -69,6 +70,27 @@ pub enum DriveError {
     Interrupted,
 }
 
+// Manual Clone implementation because std::io::Error doesn't implement Clone
+impl Clone for DriveError {
+    fn clone(&self) -> Self {
+        match self {
+            DriveError::IoError(e) => DriveError::IoError(std::io::Error::new(e.kind(), e.to_string())),
+            DriveError::DriveFrozen(s) => DriveError::DriveFrozen(s.clone()),
+            DriveError::HardwareCommandFailed(s) => DriveError::HardwareCommandFailed(s.clone()),
+            DriveError::SMARTReadFailed(s) => DriveError::SMARTReadFailed(s.clone()),
+            DriveError::TemperatureExceeded(s) => DriveError::TemperatureExceeded(s.clone()),
+            DriveError::TRIMFailed(s) => DriveError::TRIMFailed(s.clone()),
+            DriveError::CryptoEraseFailed(s) => DriveError::CryptoEraseFailed(s.clone()),
+            DriveError::UnlockFailed(s) => DriveError::UnlockFailed(s.clone()),
+            DriveError::Timeout(s) => DriveError::Timeout(s.clone()),
+            DriveError::PermissionDenied(s) => DriveError::PermissionDenied(s.clone()),
+            DriveError::NotFound(s) => DriveError::NotFound(s.clone()),
+            DriveError::Unsupported(s) => DriveError::Unsupported(s.clone()),
+            DriveError::Interrupted => DriveError::Interrupted,
+        }
+    }
+}
+
 impl From<anyhow::Error> for DriveError {
     fn from(err: anyhow::Error) -> Self {
         // Map to the most appropriate variant based on error message
@@ -111,7 +133,7 @@ impl Default for WipeConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HPADCOHandling {
     Ignore,           // Don't check for HPA/DCO
     Detect,           // Detect and warn only
